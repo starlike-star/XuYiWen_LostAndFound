@@ -131,7 +131,7 @@ $env:Path = 'C:\Program Files\Huawei\DevEco Studio\tools\node;' + $env:Path
 - `entry/src/test/AppStore.test.ets`：发布、点赞、收藏、认领审核和归还状态流。
 - `entry/src/test/ContentCodec.test.ets`：超过 Preferences 单值上限的大快照分片与无损合并。
 
-完整的自动化与真机/模拟器手工回归步骤见 [TESTING.md](TESTING.md)。
+完整的自动化与真机/模拟器手工回归步骤见 [TESTING.md](TESTING.md)
 
 ## 项目结构
 
@@ -393,5 +393,6 @@ docker compose -f deploy/compose.yaml ps
 ## 许可证
 
 项目当前未声明开源许可证。在补充许可证前，请勿默认将代码用于公开分发或商业用途。
-#   L o s t A n d F o u n d  
+#   L o s t A n d F o u n d 
+ 
  
