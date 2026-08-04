@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "校园失物招领客户端"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "校园失物招领应用入口"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "校园失物招领"
+    }
+  ]
+}
