@@ -322,6 +322,10 @@ $env:Path = 'C:\Program Files\Huawei\DevEco Studio\tools\node;' + $env:Path
 - [Knex 文档](https://knexjs.org/guide/)：数据库连接和 migrations。
 - [Docker Compose 文档](https://docs.docker.com/compose/)：API 和图片存储服务部署。
 
-## 许可证
+## 开源协议
 
-项目当前未声明开源许可证。在补充许可证前，请勿默认将代码用于公开分发或商业用途。
+Copyright (c) 2026 徐翊文
+
+本项目采用 MIT License 开源协议。
+
+详细内容请查看 [LICENSE](LICENSE) 文件。
