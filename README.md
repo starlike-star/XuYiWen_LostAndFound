@@ -324,8 +324,6 @@ $env:Path = 'C:\Program Files\Huawei\DevEco Studio\tools\node;' + $env:Path
 
 ## 开源协议
 
-Copyright (c) 2026 徐翊文
-
 本项目采用 MIT License 开源协议。
 
 详细内容请查看 [LICENSE](LICENSE) 文件。
