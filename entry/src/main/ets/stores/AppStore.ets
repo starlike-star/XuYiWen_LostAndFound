@@ -25,6 +25,7 @@ export class AppStore {
   constructor(currentUserId: string, posts: Post[]) {
     this.currentUserId = currentUserId;
     this.posts = posts;
+    this.favoritePostIds = posts.filter((post: Post) => post.isFavorite).map((post: Post) => post.id);
   }
 
   static createDemo(currentUserId: string, currentUserName: string = '小林同学'): AppStore {
@@ -110,9 +111,18 @@ export class AppStore {
         post.description.toLowerCase().includes(keyword) || post.location.toLowerCase().includes(keyword);
       const kindMatch: boolean = filter.kind === undefined || post.kind === filter.kind;
       const categoryMatch: boolean = filter.category.length === 0 || post.category === filter.category;
-      const statusMatch: boolean = filter.status === undefined || post.status === filter.status;
+      const statusMatch: boolean = post.status !== PostStatus.DELETED &&
+        (filter.status === undefined || post.status === filter.status);
       return keywordMatch && kindMatch && categoryMatch && statusMatch;
     });
+  }
+
+  setAdminPostStatus(postId: string, status: PostStatus): boolean {
+    const post: Post | undefined = this.findPost(postId);
+    if (post === undefined) return false;
+    post.status = status;
+    this.posts = this.posts.slice();
+    return true;
   }
 
   publish(draft: PostDraft, ownerName: string): string {
@@ -171,6 +181,25 @@ export class AppStore {
     this.favoritePostIds = this.favoritePostIds.slice();
   }
 
+  updatePostInteractions(postId: string, likeCount: number, isLiked: boolean, isFavorite: boolean): void {
+    const post: Post | undefined = this.findPost(postId);
+    if (post === undefined) return;
+    post.likeCount = likeCount;
+    post.isLiked = isLiked;
+    post.isFavorite = isFavorite;
+    if (isFavorite && !this.favoritePostIds.includes(postId)) this.favoritePostIds.push(postId);
+    if (!isFavorite) this.favoritePostIds = this.favoritePostIds.filter((id: string) => id !== postId);
+    this.posts = this.posts.slice();
+    this.favoritePostIds = this.favoritePostIds.slice();
+  }
+
+  updatePostCommentCount(postId: string, commentCount: number): void {
+    const post: Post | undefined = this.findPost(postId);
+    if (post === undefined) return;
+    post.commentCount = commentCount;
+    this.posts = this.posts.slice();
+  }
+
   markNotificationRead(notificationId: string): boolean {
     const notice: AppNotification | undefined = this.notifications.find((item: AppNotification) =>
       item.id === notificationId);
@@ -180,6 +209,22 @@ export class AppStore {
     notice.read = true;
     this.notifications = this.notifications.slice();
     return true;
+  }
+
+  unreadNotificationCount(): number {
+    return this.notifications.filter((item: AppNotification) => !item.read).length;
+  }
+
+  markAllNotificationsRead(): boolean {
+    let changed = false;
+    this.notifications.forEach((item: AppNotification) => {
+      if (!item.read) {
+        item.read = true;
+        changed = true;
+      }
+    });
+    if (changed) this.notifications = this.notifications.slice();
+    return changed;
   }
 
   addComment(postId: string, userName: string, content: string): string {
@@ -291,7 +336,7 @@ export class AppStore {
   }
 
   favoritePosts(): Post[] {
-    return this.posts.filter((post: Post) => this.favoritePostIds.includes(post.id));
+    return this.posts.filter((post: Post) => post.status !== PostStatus.DELETED && this.favoritePostIds.includes(post.id));
   }
 
   hasOpenPosts(): boolean {

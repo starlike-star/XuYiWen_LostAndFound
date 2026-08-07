@@ -1,0 +1,26 @@
+{
+  "name": "lostfound-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22 <25"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test",
+    "migrate": "knex --knexfile src/db/knex.js migrate:latest",
+    "migrate:rollback": "knex --knexfile src/db/knex.js migrate:rollback"
+  },
+  "dependencies": {
+    "bcrypt": "6.0.0",
+    "express": "5.1.0",
+    "jsonwebtoken": "9.0.2",
+    "knex": "3.1.0",
+    "multer": "2.2.0",
+    "mysql2": "3.14.4"
+  },
+  "devDependencies": {
+    "supertest": "7.1.4"
+  }
+}

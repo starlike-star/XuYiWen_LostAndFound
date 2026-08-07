@@ -1,0 +1,25 @@
+services:
+  api:
+    build:
+      context: ../server
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      APP_JWT_SECRET: ${APP_JWT_SECRET}
+      APP_STORAGE_ROOT: /app/storage/uploads
+      APP_PUBLIC_UPLOAD_PREFIX: /uploads
+      PORT: 3000
+    volumes:
+      - lostfound_uploads:/app/storage/uploads
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - lostfound_uploads:/var/www/uploads:ro
+
+volumes:
+  lostfound_uploads:

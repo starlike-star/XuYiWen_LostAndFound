@@ -1,0 +1,17 @@
+services:
+  image-storage:
+    build:
+      context: ../storage-service
+    environment:
+      PORT: 8081
+      STORAGE_ROOT: /srv/lostfound/uploads
+      STORAGE_PUBLIC_BASE_URL: http://192.168.137.10:8081
+      STORAGE_SHARED_SECRET: ${STORAGE_SHARED_SECRET}
+    ports:
+      - "192.168.137.10:8081:8081"
+    volumes:
+      - lostfound_uploads:/srv/lostfound/uploads
+    restart: unless-stopped
+
+volumes:
+  lostfound_uploads:

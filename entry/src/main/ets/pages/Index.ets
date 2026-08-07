@@ -8,9 +8,12 @@ import {
   UserAccount,
   VerificationPurpose
 } from '../models/AccountModels';
-import { AppNotification, ClaimRequest, ClaimStatus, ContentSnapshot, Post, PostDraft, PostKind, PostStatus } from '../models/AppModels';
+import { AppNotification, ClaimRequest, ClaimStatus, ContentSnapshot, Post, PostComment, PostDraft, PostKind, PostStatus } from '../models/AppModels';
 import { roleLabel } from '../services/AccountRules';
 import { ContentRepository } from '../services/ContentRepository';
+import { ImagePickerService } from '../services/ImagePickerService';
+import { ContentApiRepository } from '../services/api/ContentApiRepository';
+import { FileApiRepository } from '../services/api/FileApiRepository';
 import { AppStore } from '../stores/AppStore';
 import { AuthStore } from '../stores/AuthStore';
 
@@ -62,8 +65,10 @@ struct Index {
   @State authStore: AuthStore = new AuthStore();
   @State appStore: AppStore = AppStore.createDemo('student-1');
   private contentRepository: ContentRepository = new ContentRepository();
+  private contentApiRepository: ContentApiRepository = new ContentApiRepository();
   private contentSaveQueue: Promise<void> = Promise.resolve();
   private pathStack: NavPathStack = new NavPathStack();
+  private readNotificationIds: string[] = [];
 
   aboutToAppear(): void {
     this.initializeApp();
@@ -90,6 +95,24 @@ struct Index {
       this.appStore = AppStore.createDemo('student-1');
       return;
     }
+    if (this.authStore.session?.deviceId === 'remote-api' && this.authStore.session.token.length > 0) {
+      const posts = await this.contentApiRepository.listPosts(this.authStore.session.token);
+      const notifications = await this.contentApiRepository.listNotifications(this.authStore.session.token);
+      notifications.forEach((item: AppNotification) => {
+        if (this.readNotificationIds.includes(item.id)) item.read = true;
+      });
+      const store = new AppStore(account.id, posts);
+      store.notifications = notifications;
+      this.appStore = store;
+      return;
+    }
+    try {
+      const posts = await this.contentApiRepository.listPublicPosts();
+      this.appStore = new AppStore(account.id, posts);
+      return;
+    } catch (error) {
+      // Keep the local demo fallback available when the API is not running.
+    }
     const snapshot: ContentSnapshot | undefined = this.contentRepository.load(account.id);
     if (snapshot !== undefined) {
       this.appStore = AppStore.fromSnapshot(account.id, snapshot);
@@ -102,6 +125,7 @@ struct Index {
   private async refreshAfterAuth(): Promise<void> {
     try {
       await this.contentSaveQueue;
+      this.readNotificationIds = [];
       await this.loadCurrentAccountContent();
       this.operationError = '';
     } catch (error) {
@@ -109,6 +133,36 @@ struct Index {
     }
     this.route = 'tabs';
     this.revision += 1;
+  }
+
+  private refreshContent(): void {
+    this.readNotificationIds = this.appStore.notifications
+      .filter((item: AppNotification) => item.read).map((item: AppNotification) => item.id);
+    if (this.authStore.session?.deviceId === 'remote-api') {
+      this.loadCurrentAccountContent().then(() => {
+        this.operationError = '';
+        this.revision += 1;
+      }).catch(() => {
+        this.operationError = '内容同步失败，请稍后重试';
+        this.revision += 1;
+      });
+      return;
+    }
+    this.persistContent();
+  }
+
+  private async markNotificationsRead(): Promise<void> {
+    if (!this.appStore.markAllNotificationsRead()) return;
+    const session = this.authStore.session;
+    if (session?.deviceId === 'remote-api' && session.token.length > 0) {
+      const notificationIds: string[] = this.appStore.notifications.map((item: AppNotification) => item.id);
+      try {
+        await this.contentApiRepository.markNotificationsRead(session.token, notificationIds);
+      } catch (error) {
+        // Keep the in-memory read state as a fallback until the next successful sync.
+      }
+    }
+    this.refreshContent();
   }
 
   private async saveSnapshot(accountId: string, snapshot: ContentSnapshot): Promise<void> {
@@ -143,7 +197,8 @@ struct Index {
             onChanged: () => this.refreshAfterAuth() })
         } else if (this.authStore.currentAccount.isAdmin) {
           AdminDashboard({ store: this.authStore, contentStore: this.appStore, account: this.authStore.currentAccount,
-            revision: this.revision, onChanged: () => this.revision += 1,
+            revision: this.revision, accessToken: this.authStore.session?.token ?? '', apiRepository: this.contentApiRepository,
+            onChanged: () => this.revision += 1,
             onLogout: () => {
               this.authStore.logout().then(() => this.refreshAfterAuth()).catch(() => {
                 this.operationError = '退出状态保存失败，请稍后重试';
@@ -153,7 +208,8 @@ struct Index {
         } else if (this.route === 'detail') {
           PostDetailPage({ store: this.appStore, account: this.authStore.currentAccount,
             postId: this.selectedPostId, revision: this.revision,
-            onBack: () => { this.route = 'tabs'; }, onChanged: () => this.persistContent() })
+            accessToken: this.authStore.session?.token ?? '', apiRepository: this.contentApiRepository,
+            onBack: () => { this.route = 'tabs'; }, onChanged: () => this.refreshContent() })
         } else if (this.route === 'profile-edit') {
           EditProfilePage({ store: this.authStore, account: this.authStore.currentAccount,
             revision: this.revision, onBack: () => { this.route = 'tabs'; },
@@ -165,10 +221,15 @@ struct Index {
         } else {
           UserTabs({ authStore: this.authStore, appStore: this.appStore,
             account: this.authStore.currentAccount, revision: this.revision,
-            onChanged: () => this.persistContent(),
+            accessToken: this.authStore.session?.token ?? '', apiRepository: this.contentApiRepository,
+            onChanged: () => this.refreshContent(),
             onOpenPost: (postId: string) => { this.selectedPostId = postId; this.route = 'detail'; },
             onEditProfile: () => { this.route = 'profile-edit'; },
-            onSecurity: () => { this.route = 'security'; } })
+            onSecurity: () => { this.route = 'security'; },
+             unreadCount: this.appStore.unreadNotificationCount(),
+             onMessagesOpened: () => {
+               this.markNotificationsRead();
+             } })
         }
         if (this.operationError.length > 0) {
           Text(this.operationError).fontSize(13).fontColor(COLOR_DANGER).backgroundColor('#FFF0EF')
@@ -262,6 +323,13 @@ struct AuthPage {
   @Builder
   loginContent() {
     Column({ space: 14 }) {
+      if (this.loginMethod === LoginMethod.PASSWORD) {
+        this.inputField('手机号或学校邮箱', this.passwordAccount, '请输入手机号或学校邮箱', false,
+          (value: string) => this.passwordAccount = value)
+      } else {
+        this.inputField('手机号或学校邮箱', this.codeAccount, '请输入手机号或学校邮箱', false,
+          (value: string) => this.codeAccount = value)
+      }
       Row({ space: 8 }) {
         Button('密码登录').layoutWeight(1).fontSize(13)
           .fontColor(this.loginMethod === LoginMethod.PASSWORD ? COLOR_SURFACE : COLOR_SECONDARY)
@@ -273,13 +341,9 @@ struct AuthPage {
           .onClick(() => { this.loginMethod = LoginMethod.CODE; this.error = ''; })
       }.width('100%')
       if (this.loginMethod === LoginMethod.PASSWORD) {
-        this.inputField('手机号或学校邮箱', this.passwordAccount, '请输入手机号或学校邮箱', false,
-          (value: string) => this.passwordAccount = value)
         this.inputField('密码', this.loginPassword, '请输入密码', true,
           (value: string) => this.loginPassword = value)
       } else {
-        this.inputField('手机号或学校邮箱', this.codeAccount, '请输入已绑定的手机号或学校邮箱', false,
-          (value: string) => this.codeAccount = value)
         this.inputField('验证码', this.loginCode, '请输入6位验证码', false,
           (value: string) => this.loginCode = value)
         Row() {
@@ -300,6 +364,12 @@ struct AuthPage {
             if (message.length === 0) { this.onChanged(); }
           }).catch(() => this.error = '登录失败，请稍后重试');
         })
+      Row({ space: 18 }) {
+        Text('注册账号').fontSize(13).fontColor(COLOR_PRIMARY)
+          .onClick(() => { this.pageMode = 1; this.error = ''; })
+        Text('找回密码').fontSize(13).fontColor(COLOR_PRIMARY)
+          .onClick(() => { this.pageMode = 2; this.error = ''; })
+      }.justifyContent(FlexAlign.Center).width('100%')
       Text('学生演示：13800000001 / lin@campus.edu.cn / Campus123').fontSize(12).fontColor(COLOR_SECONDARY)
       Text('管理员：admin@campus.edu.cn / Admin1234').fontSize(12).fontColor(COLOR_SECONDARY)
       Text('验证码为临时凭据，仅用于验证码登录').fontSize(12).fontColor(COLOR_SECONDARY)
@@ -414,16 +484,15 @@ struct AuthPage {
           Text('校园失物招领').fontSize(32).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT)
           Text('让每一件物品，都有回家的线索').fontSize(15).fontColor(COLOR_SECONDARY)
         }.alignItems(HorizontalAlign.Start).width('100%')
-        Row({ space: 8 }) {
-          this.modeButton('登录', 0)
-          this.modeButton('注册', 1)
-          this.modeButton('找回密码', 2)
-        }.width('100%')
         Column() {
           if (this.pageMode === 0) { this.loginContent() }
           else if (this.pageMode === 1) { this.registerContent() }
           else { this.forgotContent() }
         }.width('100%').padding(20).backgroundColor(COLOR_SURFACE).borderRadius(20)
+        if (this.pageMode !== 0) {
+          Button('返回登录').width('100%').backgroundColor(Color.Transparent).fontColor(COLOR_PRIMARY)
+            .onClick(() => { this.pageMode = 0; this.error = ''; })
+        }
         if (this.error.length > 0) {
           Text(this.error).width('100%').padding(12).borderRadius(10).backgroundColor('#FFF4E5')
             .fontColor(this.error.includes('成功') || this.error.includes('生成') ? COLOR_SUCCESS : COLOR_DANGER).fontSize(13)
@@ -443,14 +512,20 @@ struct UserTabs {
   onOpenPost: (postId: string) => void = () => {};
   onEditProfile: () => void = () => {};
   onSecurity: () => void = () => {};
+  accessToken: string = '';
+  apiRepository: ContentApiRepository = new ContentApiRepository();
+  unreadCount: number = 0;
+  onMessagesOpened: () => void = () => {};
   @State selectedTab: number = 0;
 
   build() {
     Tabs({ barPosition: BarPosition.End, index: this.selectedTab }) {
       TabContent() { HomePage({ store: this.appStore, revision: this.revision,
+        unreadCount: this.unreadCount, onOpenMessages: () => { this.selectedTab = 2; this.onMessagesOpened(); },
         onChanged: this.onChanged, onOpenPost: this.onOpenPost }) }.tabBar('首页')
       TabContent() { PublishPage({ store: this.appStore, account: this.account,
-        revision: this.revision, onChanged: this.onChanged, onOpenPost: this.onOpenPost }) }.tabBar('发布')
+        revision: this.revision, accessToken: this.accessToken, apiRepository: this.apiRepository,
+        onChanged: this.onChanged, onOpenPost: this.onOpenPost }) }.tabBar('发布')
       TabContent() { MessagePage({ store: this.appStore, revision: this.revision,
         onChanged: this.onChanged, onOpenPost: this.onOpenPost }) }.tabBar('消息')
       TabContent() { ProfilePage({ authStore: this.authStore, appStore: this.appStore,
@@ -458,7 +533,10 @@ struct UserTabs {
         onEditProfile: this.onEditProfile, onSecurity: this.onSecurity }) }.tabBar('我的')
     }
     .barMode(BarMode.Fixed).barBackgroundColor(COLOR_SURFACE).backgroundColor(COLOR_BACKGROUND)
-    .onChange((index: number) => this.selectedTab = index)
+    .onChange((index: number) => {
+      this.selectedTab = index;
+      if (index === 2) this.onMessagesOpened();
+    })
   }
 }
 
@@ -468,6 +546,8 @@ struct HomePage {
   @Prop revision: number = 0;
   onChanged: () => void = () => {};
   onOpenPost: (postId: string) => void = () => {};
+  onOpenMessages: () => void = () => {};
+  unreadCount: number = 0;
   @State keyword: string = '';
   @State selectedKind: number = 0;
   @State category: string = '';
@@ -489,9 +569,16 @@ struct HomePage {
             Column({ space: 4 }) {
               Text('校园失物招领').fontSize(30).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT)
               Text('主校区 · 今日有 8 条新线索').fontSize(13).fontColor(COLOR_SECONDARY)
-            }.alignItems(HorizontalAlign.Start)
-            Blank()
-            Text('🔔').fontSize(24).padding(10).backgroundColor(COLOR_SURFACE).borderRadius(20)
+             }.alignItems(HorizontalAlign.Start)
+             Blank().layoutWeight(1)
+             Stack({ alignContent: Alignment.TopEnd }) {
+              Button('🔔').fontSize(20).width(44).height(44).padding(0)
+                .backgroundColor(COLOR_SURFACE).borderRadius(22).onClick(this.onOpenMessages)
+              if (this.unreadCount > 0) {
+                Text(this.unreadCount > 99 ? '99+' : `${this.unreadCount}`).fontSize(9).fontColor(Color.White)
+                  .width(18).height(18).textAlign(TextAlign.Center).backgroundColor(COLOR_DANGER).borderRadius(9)
+              }
+            }.width(44).height(44)
           }.width('100%')
           TextInput({ text: this.keyword, placeholder: '搜索物品、地点或描述' })
             .height(48).backgroundColor(COLOR_SURFACE).borderRadius(14).padding({ left: 14, right: 14 })
@@ -560,8 +647,12 @@ struct PostCard {
   build() {
     Column({ space: 12 }) {
       Row({ space: 14 }) {
-        Text(this.emoji()).fontSize(42).width(78).height(78).textAlign(TextAlign.Center)
-          .backgroundColor(this.post.kind === PostKind.LOST_NOTICE ? '#EAF3FF' : '#FFF4E5').borderRadius(16)
+        if (this.post.imageKey.length > 0) {
+          Image(this.post.imageKey).width(78).height(78).objectFit(ImageFit.Cover).borderRadius(16)
+        } else {
+          Text(this.emoji()).fontSize(42).width(78).height(78).textAlign(TextAlign.Center)
+            .backgroundColor(this.post.kind === PostKind.LOST_NOTICE ? '#EAF3FF' : '#FFF4E5').borderRadius(16)
+        }
         Column({ space: 6 }) {
           Row({ space: 6 }) {
             Text(this.post.kind === PostKind.LOST_NOTICE ? '失物' : '寻物').fontSize(11)
@@ -596,7 +687,54 @@ struct PublishPage {
   @State location: string = '';
   @State occurredAt: string = '今天';
   @State imageKey: string = 'placeholder';
+  @State selectedUris: string[] = [];
+  @State submitting: boolean = false;
   @State message: string = '';
+  accessToken: string = '';
+  apiRepository: ContentApiRepository = new ContentApiRepository();
+  private fileApiRepository: FileApiRepository = new FileApiRepository();
+
+  private async chooseImages(): Promise<void> {
+    try {
+      this.selectedUris = await new ImagePickerService().pickImages(6);
+      this.message = this.selectedUris.length > 0 ? `已选择 ${this.selectedUris.length} 张图片` : '';
+    } catch (error) {
+      this.message = '图片选择已取消';
+    }
+  }
+
+  private async submit(): Promise<void> {
+    if (this.title.trim().length === 0 || this.description.trim().length < 10 || this.location.trim().length === 0) {
+      this.message = '请完整填写名称、地点和至少10字描述';
+      return;
+    }
+    this.submitting = true;
+    try {
+      const draft: PostDraft = { kind: this.kind, title: this.title.trim(), description: this.description.trim(),
+        category: this.category, location: this.location.trim(), occurredAt: this.occurredAt, imageKey: this.imageKey };
+      if (this.accessToken.length > 0) {
+        const contact: string = this.account.phone.length > 0 ? this.account.phone : this.account.email;
+        let imageIds: string[] = [];
+        if (this.selectedUris.length > 0) {
+          const context: common.UIAbilityContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
+          const images = await this.fileApiRepository.uploadImages(context, this.accessToken, this.selectedUris);
+          imageIds = images.map((image) => image.id);
+        }
+        const post: Post = await this.apiRepository.createPost(this.accessToken, draft, this.account.campus, contact, imageIds);
+        this.message = '发布成功，内容已同步';
+        this.onChanged();
+        this.onOpenPost(post.id);
+      } else {
+        const id: string = this.store.publish(draft, this.account.nickname);
+        this.onChanged();
+        this.onOpenPost(id);
+      }
+    } catch (error) {
+      this.message = error instanceof Error ? error.message : '发布失败，请稍后重试';
+    } finally {
+      this.submitting = false;
+    }
+  }
 
   build() {
     Scroll() {
@@ -623,23 +761,16 @@ struct PublishPage {
             })
           }.width('100%')
           Row({ space: 12 }) {
-            Text('📷').fontSize(32).width(72).height(72).textAlign(TextAlign.Center).backgroundColor('#EAF3FF').borderRadius(14)
+            Button(this.selectedUris.length > 0 ? `📷 ${this.selectedUris.length}` : '📷')
+              .fontSize(24).width(72).height(72).backgroundColor('#EAF3FF').borderRadius(14)
+              .onClick(() => this.chooseImages())
             Column({ space: 4 }) {
-              Text('演示图片已选择').fontSize(14).fontWeight(FontWeight.Medium)
-              Text('后续可替换为你提供的真实素材').fontSize(12).fontColor(COLOR_SECONDARY)
+              Text(this.selectedUris.length > 0 ? '已选择图片' : '添加物品图片').fontSize(14).fontWeight(FontWeight.Medium)
+              Text('最多选择 6 张，发布时上传到图片服务').fontSize(12).fontColor(COLOR_SECONDARY)
             }.alignItems(HorizontalAlign.Start)
           }.width('100%')
-          Button('提交发布').width('100%').height(50).backgroundColor(COLOR_PRIMARY).borderRadius(14).onClick(() => {
-            if (this.title.trim().length === 0 || this.description.trim().length < 10 || this.location.trim().length === 0) {
-              this.message = '请完整填写名称、地点和至少10字描述';
-              return;
-            }
-            const draft: PostDraft = { kind: this.kind, title: this.title, description: this.description,
-              category: this.category, location: this.location, occurredAt: this.occurredAt, imageKey: this.imageKey };
-            const id: string = this.store.publish(draft, this.account.nickname);
-            this.onChanged();
-            this.onOpenPost(id);
-          })
+          Button(this.submitting ? '提交中…' : '提交发布').width('100%').height(50).backgroundColor(COLOR_PRIMARY)
+            .borderRadius(14).enabled(!this.submitting).onClick(() => this.submit())
           if (this.message.length > 0) { Text(this.message).fontSize(13).fontColor(COLOR_DANGER) }
         }.width('100%').padding(18).backgroundColor(COLOR_SURFACE).borderRadius(18)
       }.padding({ left: 18, right: 18, top: 24, bottom: 30 }).width('100%')
@@ -658,6 +789,12 @@ struct MessagePage {
     Scroll() {
       Column({ space: 14 }) {
         Text('消息').fontSize(30).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT).width('100%')
+        if (this.store.notifications.length === 0) {
+          Column({ space: 8 }) {
+            Text('暂无消息').fontSize(17).fontWeight(FontWeight.Medium).fontColor(COLOR_TEXT)
+            Text('认领、线索和归还状态会显示在这里').fontSize(13).fontColor(COLOR_SECONDARY)
+          }.width('100%').padding(28).backgroundColor(COLOR_SURFACE).borderRadius(18)
+        }
         ForEach(this.store.notifications, (notice: AppNotification) => {
           Row({ space: 14 }) {
             Text(notice.type === 'CLAIM' ? '🙋' : (notice.type === 'CLUE' ? '💡' : '🔔')).fontSize(28)
@@ -675,7 +812,7 @@ struct MessagePage {
               this.onOpenPost(notice.postId);
             })
         })
-      }.padding({ left: 18, right: 18, top: 24, bottom: 30 }).width('100%')
+      }.padding({ left: 18, right: 18, top: 24, bottom: 30 }).width('100%').alignItems(HorizontalAlign.Start)
     }.width('100%').height('100%').backgroundColor(COLOR_BACKGROUND).scrollBar(BarState.Off)
   }
 }
@@ -713,6 +850,15 @@ struct ProfilePage {
         ForEach(this.appStore.myPosts(), (post: Post) => {
           PostCard({ post: post, onOpen: this.onOpenPost })
         }, (post: Post) => post.id)
+        Text('我的收藏').fontSize(20).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT).width('100%')
+        if (this.appStore.favoritePosts().length === 0) {
+          Text('暂无收藏').fontSize(14).fontColor(COLOR_SECONDARY).width('100%')
+            .padding({ top: 8, bottom: 8 })
+        } else {
+          ForEach(this.appStore.favoritePosts(), (post: Post) => {
+            PostCard({ post: post, onOpen: this.onOpenPost })
+          }, (post: Post) => post.id)
+        }
         Button('账号与安全').width('100%').height(48).backgroundColor(COLOR_SURFACE).fontColor(COLOR_TEXT)
           .onClick(this.onSecurity)
       }.padding({ left: 18, right: 18, top: 24, bottom: 30 }).width('100%')
@@ -736,8 +882,183 @@ struct PostDetailPage {
   @Prop revision: number = 0;
   onBack: () => void = () => {};
   onChanged: () => void = () => {};
-  @State input: string = '';
+  @State claimInput: string = '';
+  @State commentInput: string = '';
   @State message: string = '';
+  @State remoteClaims: ClaimRequest[] = [];
+  @State remoteComments: PostComment[] = [];
+  @State remotePost: Post | undefined = undefined;
+  @State busy: boolean = false;
+  @State interactionBusy: boolean = false;
+  accessToken: string = '';
+  apiRepository: ContentApiRepository = new ContentApiRepository();
+
+  aboutToAppear(): void {
+    this.loadRemoteClaims();
+  }
+
+  private async loadRemoteClaims(): Promise<void> {
+    if (this.accessToken.length === 0) return;
+    try {
+      const remotePost: Post = await this.apiRepository.getPost(this.accessToken, this.postId);
+      this.remotePost = remotePost;
+      this.remoteClaims = remotePost.ownerId === this.account.id ?
+        await this.apiRepository.listClaims(this.accessToken, this.postId) : [];
+      this.remoteComments = await this.apiRepository.listComments(this.accessToken, this.postId);
+      this.remotePost = this.withCommentCount(this.remotePost as Post, this.remoteComments.length);
+    } catch (error) {
+      this.remoteClaims = [];
+      this.remoteComments = [];
+    }
+  }
+
+  private currentPost(): Post | undefined {
+    return this.remotePost ?? this.store.findPost(this.postId);
+  }
+
+  private withInteractions(post: Post, likeCount: number, isLiked: boolean, isFavorite: boolean): Post {
+    return {
+      id: post.id, ownerId: post.ownerId, ownerName: post.ownerName, kind: post.kind, status: post.status,
+      title: post.title, description: post.description, category: post.category, location: post.location,
+      occurredAt: post.occurredAt, imageKey: post.imageKey, likeCount: likeCount, commentCount: post.commentCount,
+      isLiked: isLiked, isFavorite: isFavorite, createdAt: post.createdAt
+    };
+  }
+
+  private withCommentCount(post: Post, commentCount: number): Post {
+    return {
+      id: post.id, ownerId: post.ownerId, ownerName: post.ownerName, kind: post.kind, status: post.status,
+      title: post.title, description: post.description, category: post.category, location: post.location,
+      occurredAt: post.occurredAt, imageKey: post.imageKey, likeCount: post.likeCount, commentCount: commentCount,
+      isLiked: post.isLiked, isFavorite: post.isFavorite, createdAt: post.createdAt
+    };
+  }
+
+  private async toggleLike(post: Post): Promise<void> {
+    if (this.interactionBusy) return;
+    const enabled = !post.isLiked;
+    this.interactionBusy = true;
+    if (this.accessToken.length === 0) {
+      this.store.toggleLike(post.id);
+      this.onChanged();
+      this.interactionBusy = false;
+      return;
+    }
+    this.remotePost = this.withInteractions(post, Math.max(0, post.likeCount + (enabled ? 1 : -1)), enabled, post.isFavorite);
+    try {
+      const result = await this.apiRepository.setLike(this.accessToken, post.id, enabled);
+      this.remotePost = this.withInteractions(this.remotePost as Post, result.likeCount, result.isLiked, post.isFavorite);
+      this.store.updatePostInteractions(post.id, result.likeCount, result.isLiked, post.isFavorite);
+    } catch (error) {
+      this.remotePost = post;
+      this.message = '点赞操作失败，请稍后重试';
+    } finally {
+      this.interactionBusy = false;
+    }
+  }
+
+  private async toggleFavorite(post: Post): Promise<void> {
+    if (this.interactionBusy) return;
+    const enabled = !post.isFavorite;
+    this.interactionBusy = true;
+    if (this.accessToken.length === 0) {
+      this.store.toggleFavorite(post.id);
+      this.onChanged();
+      this.interactionBusy = false;
+      return;
+    }
+    this.remotePost = this.withInteractions(post, post.likeCount, post.isLiked, enabled);
+    try {
+      const result = await this.apiRepository.setFavorite(this.accessToken, post.id, enabled);
+      this.remotePost = this.withInteractions(this.remotePost as Post, post.likeCount, post.isLiked, result.isFavorite);
+      this.store.updatePostInteractions(post.id, post.likeCount, post.isLiked, result.isFavorite);
+    } catch (error) {
+      this.remotePost = post;
+      this.message = '收藏操作失败，请稍后重试';
+    } finally {
+      this.interactionBusy = false;
+    }
+  }
+
+  private async submitAction(post: Post): Promise<void> {
+    if (this.claimInput.trim().length === 0) {
+      this.message = '请先填写说明';
+      return;
+    }
+    this.busy = true;
+    try {
+      if (this.accessToken.length > 0) {
+        if (post.kind === PostKind.LOST_NOTICE) {
+          await this.apiRepository.submitClaim(this.accessToken, post.id, this.claimInput.trim());
+        } else {
+          await this.apiRepository.submitClue(this.accessToken, post.id, this.claimInput.trim());
+        }
+        this.message = '提交成功，状态已实时同步';
+        this.claimInput = '';
+        await this.loadRemoteClaims();
+        this.onChanged();
+      } else {
+        if (post.kind === PostKind.LOST_NOTICE) this.store.submitClaim(post.id, this.claimInput);
+        else this.store.submitClue(post.id, this.claimInput);
+        this.message = '提交成功，进度已同步到消息与我的记录';
+        this.claimInput = '';
+        this.onChanged();
+      }
+    } catch (error) {
+      this.message = error instanceof Error ? error.message : '提交失败，请稍后重试';
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  private async submitComment(post: Post): Promise<void> {
+    const content: string = this.commentInput.trim();
+    if (content.length < 1 || content.length > 200) {
+      this.message = '评论须为1~200个字符';
+      return;
+    }
+    this.busy = true;
+    try {
+      if (this.accessToken.length > 0) {
+        const comment: PostComment = await this.apiRepository.createComment(this.accessToken, post.id, content);
+        this.remoteComments = this.remoteComments.concat([comment]);
+        this.store.updatePostCommentCount(post.id, this.remoteComments.length);
+        if (this.remotePost !== undefined) {
+          this.remotePost = this.withCommentCount(this.remotePost, this.remoteComments.length);
+        }
+      } else {
+        const error: string = this.store.addComment(post.id, this.account.nickname, content);
+        if (error.length > 0) {
+          this.message = error;
+          return;
+        }
+        this.commentInput = '';
+        this.message = '评论成功';
+        this.onChanged();
+        return;
+      }
+      this.commentInput = '';
+      this.message = '评论成功';
+    } catch (error) {
+      this.message = error instanceof Error ? error.message : '评论失败，请稍后重试';
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  private async confirmRemoteReturn(claimId: string): Promise<void> {
+    this.busy = true;
+    try {
+      await this.apiRepository.confirmReturn(this.accessToken, claimId);
+      this.message = '已确认归还，状态已实时同步';
+      await this.loadRemoteClaims();
+      this.onChanged();
+    } catch (error) {
+      this.message = error instanceof Error ? error.message : '确认归还失败，请稍后重试';
+    } finally {
+      this.busy = false;
+    }
+  }
 
   build() {
     Column() {
@@ -745,11 +1066,11 @@ struct PostDetailPage {
         Button('‹ 返回').backgroundColor(Color.Transparent).fontColor(COLOR_PRIMARY).onClick(this.onBack)
         Blank()
       }.width('100%').height(56).padding({ left: 8, right: 18 })
-      if (this.store.findPost(this.postId) === undefined) {
+      if (this.currentPost() === undefined) {
         Column({ space: 10 }) { Text('信息不存在').fontSize(18); Button('返回').onClick(this.onBack) }
           .width('100%').layoutWeight(1).justifyContent(FlexAlign.Center)
       } else {
-        this.detailContent(this.store.findPost(this.postId) as Post)
+        this.detailContent(this.currentPost() as Post)
       }
     }.width('100%').height('100%').backgroundColor(COLOR_BACKGROUND)
   }
@@ -758,9 +1079,14 @@ struct PostDetailPage {
   detailContent(post: Post) {
     Scroll() {
       Column({ space: 16 }) {
-        Text(post.category === '电子数码' ? '📱' : (post.category === '证件卡类' ? '💳' : '🎒'))
-          .fontSize(86).width('100%').height(210).textAlign(TextAlign.Center)
-          .backgroundColor(post.kind === PostKind.LOST_NOTICE ? '#EAF3FF' : '#FFF4E5').borderRadius(22)
+        if (post.imageKey.length > 0) {
+          Image(post.imageKey).width('100%').height(210).objectFit(ImageFit.Contain)
+            .backgroundColor(post.kind === PostKind.LOST_NOTICE ? '#EAF3FF' : '#FFF4E5').borderRadius(22)
+        } else {
+          Text(post.category === '电子数码' ? '📱' : (post.category === '证件卡类' ? '💳' : '🎒'))
+            .fontSize(86).width('100%').height(210).textAlign(TextAlign.Center)
+            .backgroundColor(post.kind === PostKind.LOST_NOTICE ? '#EAF3FF' : '#FFF4E5').borderRadius(22)
+        }
         Row({ space: 8 }) {
           Text(post.kind === PostKind.LOST_NOTICE ? '失物' : '寻物').fontSize(12).fontColor(COLOR_PRIMARY)
             .padding({ left: 10, right: 10, top: 4, bottom: 4 }).backgroundColor('#EAF3FF').borderRadius(8)
@@ -775,50 +1101,65 @@ struct PostDetailPage {
           Blank()
           Button(post.isLiked ? `♥ ${post.likeCount}` : `♡ ${post.likeCount}`).fontSize(13)
             .backgroundColor('#EFEFF4').fontColor(post.isLiked ? COLOR_DANGER : COLOR_SECONDARY)
-            .onClick(() => { this.store.toggleLike(post.id); this.onChanged(); })
-          Button(post.isFavorite ? '已收藏' : '收藏').fontSize(13).backgroundColor('#EFEFF4')
-            .fontColor(COLOR_PRIMARY).onClick(() => { this.store.toggleFavorite(post.id); this.onChanged(); })
+            .enabled(!this.interactionBusy && !this.busy)
+            .onClick(() => this.toggleLike(post))
+          Button(post.isFavorite ? '\u5df2\u6536\u85cf' : '\u6536\u85cf').fontSize(13).backgroundColor('#EFEFF4')
+            .fontColor(COLOR_PRIMARY).enabled(!this.interactionBusy && !this.busy)
+            .onClick(() => this.toggleFavorite(post))
         }.width('100%')
         if (post.status === PostStatus.ACTIVE && post.ownerId !== this.account.id) {
-          TextArea({ text: this.input, placeholder: post.kind === PostKind.LOST_NOTICE ? '描述物品独有特征，防止冒领' : '填写你掌握的地点或时间线索' })
-            .height(90).backgroundColor(COLOR_SURFACE).borderRadius(14).onChange((value: string) => this.input = value)
-          Button(post.kind === PostKind.LOST_NOTICE ? '这是我的' : '提供线索').width('100%').height(50)
-            .backgroundColor(COLOR_PRIMARY).borderRadius(14).onClick(() => {
-              if (this.input.trim().length === 0) { this.message = '请先填写说明'; return; }
-              if (post.kind === PostKind.LOST_NOTICE) { this.store.submitClaim(post.id, this.input); }
-              else { this.store.submitClue(post.id, this.input); }
-              this.message = '提交成功，进度已同步到消息与我的记录'; this.input = ''; this.onChanged();
-            })
+          Text('\u8BA4\u9886\u4FE1\u606F').fontSize(18).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT).width('100%')
+          TextArea({ text: this.claimInput, placeholder: post.kind === PostKind.LOST_NOTICE ? '描述物品独有特征，防止冒领' : '填写你掌握的地点或时间线索' })
+            .height(90).backgroundColor(COLOR_SURFACE).borderRadius(14).onChange((value: string) => this.claimInput = value)
+          Button(this.busy ? '提交中…' : (post.kind === PostKind.LOST_NOTICE ? '这是我的' : '提供线索')).width('100%').height(50)
+            .backgroundColor(COLOR_PRIMARY).borderRadius(14).enabled(!this.busy).onClick(() => this.submitAction(post))
         }
         if (post.ownerId === this.account.id) {
-          ForEach(this.store.claims.filter((claim: ClaimRequest) => claim.postId === post.id), (claim: ClaimRequest) => {
+          Text('\u8BA4\u9886\u4FE1\u606F').fontSize(18).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT).width('100%')
+          ForEach((this.accessToken.length > 0 ? this.remoteClaims : this.store.claims)
+            .filter((claim: ClaimRequest) => claim.postId === post.id), (claim: ClaimRequest) => {
             Column({ space: 10 }) {
               Text('认领申请').fontSize(16).fontWeight(FontWeight.Bold).width('100%')
               Text(claim.answer).fontSize(14).fontColor(COLOR_SECONDARY).width('100%')
               if (claim.status === ClaimStatus.PENDING) {
-                Row({ space: 10 }) {
-                  Button('拒绝').layoutWeight(1).backgroundColor('#EFEFF4').fontColor(COLOR_DANGER)
-                    .onClick(() => { this.message = this.store.reviewClaim(this.account.id, claim.id, false); this.onChanged(); })
-                  Button('同意认领').layoutWeight(1).backgroundColor(COLOR_PRIMARY)
-                    .onClick(() => { this.message = this.store.reviewClaim(this.account.id, claim.id, true); this.onChanged(); })
-                }.width('100%')
+                if (this.accessToken.length === 0) {
+                  Row({ space: 10 }) {
+                    Button('拒绝').layoutWeight(1).backgroundColor('#EFEFF4').fontColor(COLOR_DANGER)
+                      .onClick(() => { this.message = this.store.reviewClaim(this.account.id, claim.id, false); this.onChanged(); })
+                    Button('同意认领').layoutWeight(1).backgroundColor(COLOR_PRIMARY)
+                      .onClick(() => { this.message = this.store.reviewClaim(this.account.id, claim.id, true); this.onChanged(); })
+                  }.width('100%')
+                } else {
+                  Button('确认已归还').width('100%').backgroundColor(COLOR_SUCCESS)
+                    .enabled(!this.busy).onClick(() => this.confirmRemoteReturn(claim.id))
+                }
               } else if (claim.status === ClaimStatus.APPROVED) {
                 Button('确认已归还').width('100%').backgroundColor(COLOR_SUCCESS)
-                  .onClick(() => { this.message = this.store.confirmReturn(this.account.id, claim.id); this.onChanged(); })
+                  .onClick(() => {
+                    if (this.accessToken.length > 0) this.confirmRemoteReturn(claim.id);
+                    else { this.message = this.store.confirmReturn(this.account.id, claim.id); this.onChanged(); }
+                  })
               } else {
                 Text(claim.status === ClaimStatus.COMPLETED ? '已完成归还' : '申请已拒绝').fontColor(COLOR_SECONDARY)
               }
             }.width('100%').padding(16).backgroundColor(COLOR_SURFACE).borderRadius(16)
           })
         }
+        Text('\u8BC4\u8BBA').fontSize(18).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT).width('100%')
         Row({ space: 10 }) {
-          TextInput({ text: this.input, placeholder: '发表评论（最多200字）' }).layoutWeight(1).backgroundColor(COLOR_SURFACE).borderRadius(14)
-            .onChange((value: string) => this.input = value)
-          Button('发送').backgroundColor(COLOR_TEXT).onClick(() => {
-            this.message = this.store.addComment(post.id, this.account.nickname, this.input);
-            if (this.message.length === 0) { this.message = '评论成功'; this.input = ''; this.onChanged(); }
+          TextInput({ text: this.commentInput, placeholder: '发表评论（最多200字）' }).layoutWeight(1).backgroundColor(COLOR_SURFACE).borderRadius(14)
+            .onChange((value: string) => this.commentInput = value)
+          Button('发送').backgroundColor(COLOR_TEXT).enabled(!this.busy).onClick(() => {
+            this.submitComment(post);
           })
         }.width('100%')
+        ForEach((this.accessToken.length > 0 ? this.remoteComments : this.store.comments)
+          .filter((comment: PostComment) => comment.postId === post.id), (comment: PostComment) => {
+          Column({ space: 4 }) {
+            Text(comment.userName).fontSize(13).fontColor(COLOR_SECONDARY).width('100%')
+            Text(comment.content).fontSize(15).fontColor(COLOR_TEXT).width('100%')
+          }.width('100%').padding(14).backgroundColor(COLOR_SURFACE).borderRadius(14)
+        }, (comment: PostComment) => comment.id)
         if (this.message.length > 0) { Text(this.message).fontSize(13).fontColor(this.message.includes('成功') ? COLOR_SUCCESS : COLOR_DANGER) }
       }.padding({ left: 18, right: 18, bottom: 36 }).width('100%')
     }.scrollBar(BarState.Off).layoutWeight(1)
@@ -963,6 +1304,8 @@ struct AdminDashboard {
   @ObjectLink contentStore: AppStore;
   account: UserAccount = placeholderAccount();
   @Prop revision: number = 0;
+  accessToken: string = '';
+  apiRepository: ContentApiRepository = new ContentApiRepository();
   onChanged: () => void = () => {};
   onLogout: () => void = () => {};
   @State roleFilter: string = '';
@@ -972,6 +1315,47 @@ struct AdminDashboard {
   @State reason: string = '';
   @State message: string = '';
   @State confirmAction: string = '';
+  @State managedPosts: Post[] = [];
+  @State postsLoading: boolean = false;
+
+  aboutToAppear(): void {
+    this.loadManagedPosts();
+  }
+
+  private async loadManagedPosts(): Promise<void> {
+    this.postsLoading = true;
+    try {
+      this.managedPosts = this.accessToken.length > 0 ?
+        await this.apiRepository.listAdminPosts(this.accessToken) : this.contentStore.posts.slice();
+    } catch (error) {
+      this.message = '帖子列表加载失败，请稍后重试';
+      this.managedPosts = this.contentStore.posts.slice();
+    } finally {
+      this.postsLoading = false;
+    }
+  }
+
+  private async changePostStatus(post: Post, status: PostStatus): Promise<void> {
+    try {
+      const updated: Post = this.accessToken.length > 0 ?
+        (status === PostStatus.DELETED ? await this.apiRepository.setPostDeleted(this.accessToken, post.id) :
+          await this.apiRepository.restorePost(this.accessToken, post.id)) : post;
+      if (this.accessToken.length === 0) {
+        this.contentStore.setAdminPostStatus(post.id, status);
+        this.managedPosts = this.contentStore.posts.slice();
+      } else {
+        const index: number = this.managedPosts.findIndex((item: Post) => item.id === post.id);
+        if (index >= 0) {
+          this.managedPosts[index] = updated;
+          this.managedPosts = this.managedPosts.slice();
+        }
+      }
+      this.message = status === PostStatus.DELETED ? '帖子已删除，可随时恢复' : '帖子已恢复';
+      this.onChanged();
+    } catch (error) {
+      this.message = error instanceof Error ? error.message : '帖子操作失败，请稍后重试';
+    }
+  }
 
   private selectedUser(): UserAccount | undefined {
     return this.store.accounts.find((item: UserAccount) => item.id === this.selectedUserId);
@@ -1034,8 +1418,40 @@ struct AdminDashboard {
           }.width('100%').padding(16).backgroundColor(COLOR_SURFACE).borderRadius(18)
             .onClick(() => this.selectedUserId = user.id)
         }, (user: UserAccount) => user.id)
+        this.postManagement()
       }.padding({ left: 18, right: 18, top: 28, bottom: 36 }).width('100%')
     }.width('100%').height('100%').backgroundColor(COLOR_BACKGROUND).scrollBar(BarState.Off)
+  }
+
+  @Builder
+  postManagement() {
+    Column({ space: 10 }) {
+      Row() {
+        Text('帖子管理').fontSize(18).fontWeight(FontWeight.Bold)
+        Blank()
+        if (this.postsLoading) { Text('加载中…').fontSize(12).fontColor(COLOR_SECONDARY) }
+      }.width('100%')
+      if (!this.postsLoading && this.managedPosts.length === 0) {
+        Text('暂无帖子').fontSize(13).fontColor(COLOR_SECONDARY).width('100%')
+      }
+      ForEach(this.managedPosts, (post: Post) => {
+        Row({ space: 10 }) {
+          Column({ space: 4 }) {
+            Text(post.title).fontSize(14).fontWeight(FontWeight.Medium).width('100%')
+            Text(`${post.ownerName} · ${post.status === PostStatus.DELETED ? '已删除' : postStatusLabel(post.status)}`)
+              .fontSize(12).fontColor(post.status === PostStatus.DELETED ? COLOR_DANGER : COLOR_SECONDARY)
+          }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+          Button(post.status === PostStatus.DELETED ? '恢复' : '删除').fontSize(12)
+            .backgroundColor(post.status === PostStatus.DELETED ? '#E8F8EC' : '#FFE8E6')
+            .fontColor(post.status === PostStatus.DELETED ? COLOR_SUCCESS : COLOR_DANGER)
+            .onClick(() => this.changePostStatus(post, post.status === PostStatus.DELETED ? PostStatus.ACTIVE : PostStatus.DELETED))
+        }.width('100%').padding(12).backgroundColor(COLOR_SURFACE).borderRadius(14)
+      }, (post: Post) => post.id)
+      if (this.message.length > 0) {
+        Text(this.message).fontSize(13).fontColor(this.message.includes('失败') ? COLOR_DANGER : COLOR_SUCCESS)
+          .width('100%')
+      }
+    }.width('100%').padding(16).backgroundColor('#F7F8FC').borderRadius(18)
   }
 
   @Builder

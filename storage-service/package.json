@@ -1,0 +1,9 @@
+{
+  "name": "lostfound-image-storage",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22 <25" },
+  "scripts": { "start": "node src/server.js" },
+  "dependencies": { "express": "5.1.0", "multer": "2.2.0" }
+}

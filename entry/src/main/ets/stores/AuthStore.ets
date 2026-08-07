@@ -14,6 +14,7 @@ import {
 import { AccountRepository } from '../services/AccountRepository';
 import { MockAuthService } from '../services/MockAuthService';
 import { validateNickname, validatePassword, validatePhone, validateSchoolEmail } from '../services/AccountRules';
+import { ApiClient } from '../services/api/ApiClient';
 
 const SESSION_DURATION: number = 7 * 24 * 60 * 60 * 1000;
 
@@ -26,6 +27,7 @@ export class AuthStore {
   initialized: boolean = false;
   private repository: AccountRepository = new AccountRepository();
   private service: MockAuthService = new MockAuthService([]);
+  private apiClient: ApiClient = new ApiClient();
 
   async initialize(context: common.Context): Promise<void> {
     await this.repository.initialize(context);
@@ -93,8 +95,15 @@ export class AuthStore {
     const account: UserAccount | undefined = this.accounts.find((item: UserAccount) =>
       item.id === this.session?.accountId);
     const now: number = Date.now();
-    if (account === undefined || account.status !== AccountStatus.NORMAL ||
-      account.activeToken !== this.session.token || this.session.expiresAt <= now) {
+    if (account === undefined || account.status !== AccountStatus.NORMAL || this.session.expiresAt <= now) {
+      await this.logout();
+      return;
+    }
+    if (this.session.deviceId === 'remote-api') {
+      this.currentAccount = account;
+      return;
+    }
+    if (account.activeToken !== this.session.token) {
       await this.logout();
       return;
     }
@@ -113,6 +122,36 @@ export class AuthStore {
   }
 
   async login(method: LoginMethod, account: string, credential: string): Promise<string> {
+    if (method === LoginMethod.PASSWORD) {
+      try {
+        const remote = await this.apiClient.login(account, credential);
+        const localAccount: UserAccount | undefined = this.accounts.find((item: UserAccount) =>
+          item.id === remote.user.id);
+        if (localAccount === undefined) {
+          return '登录成功，但本地用户资料未初始化';
+        }
+        localAccount.nickname = remote.user.nickname;
+        localAccount.phone = remote.user.phone;
+        localAccount.email = remote.user.email;
+        localAccount.department = remote.user.department;
+        localAccount.campus = remote.user.campus;
+        localAccount.isAdmin = remote.user.isAdmin;
+        localAccount.activeToken = remote.accessToken;
+        this.currentAccount = localAccount;
+        this.session = {
+          token: remote.accessToken,
+          accountId: localAccount.id,
+          deviceId: 'remote-api',
+          issuedAt: Date.now(),
+          renewedAt: Date.now(),
+          expiresAt: Date.parse(remote.expiresAt)
+        };
+        await this.repository.saveSession(this.session);
+        return '';
+      } catch (error) {
+        return error instanceof Error ? error.message : '登录失败，请稍后重试';
+      }
+    }
     const result: AuthResult = this.service.login(method, account, credential);
     if (!result.ok || result.account === undefined || result.session === undefined) {
       return result.message;

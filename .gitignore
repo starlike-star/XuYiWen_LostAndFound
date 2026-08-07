@@ -1,12 +1,52 @@
-/node_modules
-/oh_modules
+# HarmonyOS / DevEco Studio local state and build output
+/node_modules/
+**/oh_modules/
+/.hvigor/
+**/.hvigor/
+**/build/
+**/.test/
+/.appanalyzer/
+/.cxx/
+/.clangd/
+/.clang-format/
+/.clang-tidy/
+**/build-profile.lock
+*.hap
+*.app
+*.log
+
+# Local project configuration
 /local.properties
-/.idea
-**/build
-/.hvigor
-.cxx
-/.clangd
-/.clang-format
-/.clang-tidy
-**/.test
-/.appanalyzer
+/.idea/
+
+# Node.js dependencies, test output and runtime data
+**/node_modules/
+**/coverage/
+**/dist/
+**/target/
+**/storage/
+**/uploads/
+**/.npm/
+
+# Local environment files and secrets; keep checked-in templates
+**/.env
+**/.env.*
+!**/.env.example
+*.pem
+*.key
+*.p12
+*.keystore
+
+# Editors and operating-system files
+/.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+
+# Local agent/index metadata
+/.agents/
+/.codex/
+/.codegraph/

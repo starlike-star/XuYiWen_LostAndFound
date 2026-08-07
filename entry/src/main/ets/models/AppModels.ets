@@ -7,7 +7,8 @@ export enum PostStatus {
   ACTIVE = 'ACTIVE',
   CLAIMING = 'CLAIMING',
   RESOLVED = 'RESOLVED',
-  CLOSED = 'CLOSED'
+  CLOSED = 'CLOSED',
+  DELETED = 'DELETED'
 }
 
 export enum ClaimStatus {
