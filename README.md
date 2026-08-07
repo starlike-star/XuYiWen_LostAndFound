@@ -217,6 +217,12 @@ mysql -h 127.0.0.1 -P 3308 -u lostfound -p < database/02_seed_dev.sql
 
 已有数据库升级时，根据实际版本按顺序执行对应升级脚本；不要在生产环境导入 `02_seed_dev.sql`。
 
+### SQL 数据库结构图
+
+下图展示 `lostfound` 数据库中用户认证、帖子业务、互动、图片资源和迁移记录之间的主要关系：
+
+![失物招领系统数据库彩色架构图](entry/src/main/resources/base/media/LAF_SQL.png)
+
 ### Knex migrations
 
 后端也提供 `server/src/db/migrations/` 和对应 npm 命令：
